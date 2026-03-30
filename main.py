@@ -8,8 +8,8 @@ import sys
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
-from utils import load_env, find_app_icon_path
-from windows import DownloaderWindow
+from app.utils import load_env, find_app_icon_path
+from app.windows import DownloaderWindow
 
 
 def main() -> None:
