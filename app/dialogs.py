@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from utils import runtime_base_dir
+from .utils import runtime_base_dir
 
 
 class SettingsDialog(QDialog):

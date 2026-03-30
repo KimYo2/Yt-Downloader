@@ -1,0 +1,10 @@
+{
+  "default_download_dir": "C:\\Users\\KimY\\Downloads",
+  "show_success_popup": true,
+  "auto_analyze": false,
+  "auto_start_queue": false,
+  "default_download_playlist": false,
+  "cookies_from_browser": "none",
+  "cookies_file": "",
+  "max_retries": 2
+}

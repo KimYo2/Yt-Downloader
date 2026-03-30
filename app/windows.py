@@ -32,9 +32,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from dialogs import SettingsDialog
-from models import DownloadJob
-from utils import (
+from .dialogs import SettingsDialog
+from .models import DownloadJob
+from .utils import (
     _SilentYDLLogger,
     find_app_icon_path,
     human_bytes,
