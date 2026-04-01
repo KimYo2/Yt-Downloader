@@ -10,3 +10,5 @@ app/settings.json
 .pytest_cache/
 **/__pycache__/
 *.log
+main_old.py
+icons/
