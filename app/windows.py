@@ -514,9 +514,33 @@ class DownloaderWindow(QMainWindow):
             job=pending,
             on_cancel_callback=self.on_cancel_current,
         )
+        self.progress_window.proceed_to_next.connect(self._on_progress_window_closed)
         self.progress_window.show()
 
         threading.Thread(target=self._download_worker, args=(pending, ffmpeg_location), daemon=True).start()
+
+    def _on_progress_window_closed(self, completed: bool) -> None:
+        """Called when DownloadProgressWindow emits proceed_to_next."""
+        self.progress_window = None
+        if completed:
+            self._advance_queue()
+
+    def _advance_queue(self) -> None:
+        """Start next queued job, or notify when all jobs are done."""
+        remaining = [j for j in self.job_queue if j.status in {"queued", "retry_pending"}]
+        if remaining:
+            self._process_next_job()
+        else:
+            self._notify_all_complete()
+
+    def _notify_all_complete(self) -> None:
+        """Show completion notification after the last queue item finishes."""
+        self.status_label.setText("All downloads complete.")
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Queue Finished")
+        msg_box.setText("\u2713 All downloads complete.")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.exec()
 
     def _download_worker(self, job: DownloadJob, ffmpeg_location: str) -> None:
         """Worker thread to download video/audio."""
@@ -717,26 +741,8 @@ class DownloaderWindow(QMainWindow):
                         self._update_job_item(job)
                     self.progress.setValue(100)
                     self.status_label.setText("Finished.")
-                    show_popup = bool(self.settings.get("show_success_popup", True))
                     if self.progress_window is not None:
-                        if show_popup:
-                            self.progress_window.close()
-                        else:
-                            self.progress_window.mark_done()
-                            QTimer.singleShot(1600, lambda: setattr(self, "progress_window", None))
-                        self.progress_window = None
-                    if show_popup:
-                        msg_box = QMessageBox(self)
-                        msg_box.setWindowTitle("Download Complete")
-                        msg_box.setText(msg.get("message", "Done."))
-                        open_folder_btn = msg_box.addButton("Open Folder", QMessageBox.ActionRole)
-                        msg_box.addButton(QMessageBox.Ok)
-                        msg_box.exec()
-                        if msg_box.clickedButton() == open_folder_btn and job is not None:
-                            if sys.platform == "win32":
-                                subprocess.Popen(["explorer", job.folder])
-                            else:
-                                subprocess.Popen(["xdg-open", job.folder])
+                        self.progress_window.mark_done()
 
                 elif t == "job_error":
                     job = self._find_job(msg.get("job_id"))
@@ -748,6 +754,7 @@ class DownloaderWindow(QMainWindow):
                         self.progress_window.mark_error(msg.get("message", "Something went wrong."))
                     else:
                         QMessageBox.critical(self, "Error", msg.get("message", "Something went wrong."))
+                        QTimer.singleShot(0, self._advance_queue)
 
                 elif t == "job_cancelled":
                     job = self._find_job(msg.get("job_id"))
@@ -757,12 +764,10 @@ class DownloaderWindow(QMainWindow):
                     self.status_label.setText(msg.get("message", "Cancelled."))
                     if self.progress_window is not None:
                         self.progress_window.mark_cancelled()
-                        QTimer.singleShot(1100, lambda: setattr(self, "progress_window", None))
 
                 elif t == "job_idle":
                     self.cancel_requested = False
                     self._set_busy(False)
-                    self._process_next_job()
 
                 elif t == "error":
                     self.status_label.setText("Error.")
