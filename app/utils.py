@@ -1,9 +1,11 @@
 """Utility functions and helpers for YtDownloader application."""
 
+import logging
 import os
 import shutil
 import subprocess
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 try:
@@ -176,3 +178,28 @@ def strip_cookie_settings(opts: dict) -> None:
 def has_cookie_opts(opts: dict) -> bool:
     """Check if yt-dlp options has cookie settings."""
     return "cookiefile" in opts or "cookiesfrombrowser" in opts
+
+
+def setup_logger() -> logging.Logger:
+    """Create and configure the application logger."""
+    log = logging.getLogger("ytdownloader")
+    if log.handlers:
+        return log
+    log.setLevel(logging.DEBUG)
+    fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    fh = RotatingFileHandler(
+        runtime_base_dir() / "app.log", maxBytes=2 * 1024 * 1024, backupCount=2, encoding="utf-8",
+    )
+    fh.setFormatter(fmt)
+    log.addHandler(fh)
+
+    if not getattr(sys, "frozen", False):
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        log.addHandler(sh)
+
+    return log
+
+
+logger = setup_logger()

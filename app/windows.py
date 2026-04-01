@@ -2,8 +2,11 @@
 
 import json
 import queue
+import subprocess
+import sys
 import threading
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import yt_dlp
@@ -34,12 +37,14 @@ from PySide6.QtWidgets import (
 
 from .dialogs import SettingsDialog
 from .models import DownloadJob
+from .progress_window import DownloadProgressWindow
 from .utils import (
     _SilentYDLLogger,
     find_app_icon_path,
     human_bytes,
     default_download_dir,
     detect_ffmpeg_location,
+    logger,
     runtime_base_dir,
     apply_cookie_settings,
     strip_cookie_settings,
@@ -76,6 +81,8 @@ class DownloaderWindow(QMainWindow):
         self.current_title = "-"
         self.last_analyzed_url = ""
         self.last_analyzed_formats: list[dict] = []
+
+        self.progress_window: DownloadProgressWindow | None = None
 
         self.auto_fetch_timer = QTimer(self)
         self.auto_fetch_timer.setSingleShot(True)
@@ -263,6 +270,10 @@ class DownloaderWindow(QMainWindow):
             if show_warning:
                 QMessageBox.warning(self, "Missing URL", "Please paste a valid social media/video URL first.")
             return
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            self.status_label.setText("⚠ Invalid URL. Please paste a full http/https link.")
+            return
         self._set_busy(True)
         self.status_label.setText("Analyzing URL...")
         threading.Thread(target=self._fetch_formats_worker, args=(url,), daemon=True).start()
@@ -281,6 +292,10 @@ class DownloaderWindow(QMainWindow):
             Path(folder).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             QMessageBox.critical(self, "Folder Error", f"Cannot use download folder:\n{exc}")
+            return
+
+        if any(j.url == url and j.status == "queued" for j in self.job_queue):
+            self.status_label.setText("⚠ This URL is already in the queue.")
             return
 
         estimated_size = self._estimate_file_size(
@@ -494,6 +509,13 @@ class DownloaderWindow(QMainWindow):
         self.status_label.setText(f"Downloading: {pending.title}")
         self._set_busy(True)
 
+        self.progress_window = DownloadProgressWindow(
+            parent=self,
+            job=pending,
+            on_cancel_callback=self.on_cancel_current,
+        )
+        self.progress_window.show()
+
         threading.Thread(target=self._download_worker, args=(pending, ffmpeg_location), daemon=True).start()
 
     def _download_worker(self, job: DownloadJob, ffmpeg_location: str) -> None:
@@ -631,9 +653,9 @@ class DownloaderWindow(QMainWindow):
                 message += f" | {human_bytes(speed)}/s"
             if eta is not None:
                 message += f" | ETA {int(eta)}s"
-            self.ui_queue.put({"type": "progress", "percent": percent, "message": message})
+            self.ui_queue.put({"type": "progress", "percent": percent, "message": message, "downloaded_bytes": downloaded, "total_bytes": total})
         elif status == "finished":
-            self.ui_queue.put({"type": "progress", "percent": 100.0, "message": "Download complete. Processing with ffmpeg..."})
+            self.ui_queue.put({"type": "progress", "percent": 100.0, "message": "Download complete. Processing with ffmpeg...", "downloaded_bytes": 0, "total_bytes": 0})
 
     def _poll_ui_queue(self) -> None:
         """Poll the UI queue for messages from worker threads."""
@@ -643,8 +665,16 @@ class DownloaderWindow(QMainWindow):
                 t = msg.get("type")
 
                 if t == "progress":
-                    self.progress.setValue(int(float(msg.get("percent", 0.0))))
+                    percent = float(msg.get("percent", 0.0))
+                    self.progress.setValue(int(percent))
                     self.status_label.setText(msg.get("message", "Working..."))
+                    if self.progress_window is not None:
+                        self.progress_window.update_progress(
+                            percent,
+                            msg.get("message", "Working..."),
+                            int(msg.get("downloaded_bytes", 0)),
+                            int(msg.get("total_bytes", 0)),
+                        )
 
                 elif t == "status":
                     self.status_label.setText(msg.get("message", "Working..."))
@@ -687,8 +717,26 @@ class DownloaderWindow(QMainWindow):
                         self._update_job_item(job)
                     self.progress.setValue(100)
                     self.status_label.setText("Finished.")
-                    if bool(self.settings.get("show_success_popup", True)):
-                        QMessageBox.information(self, "Success", msg.get("message", "Done."))
+                    show_popup = bool(self.settings.get("show_success_popup", True))
+                    if self.progress_window is not None:
+                        if show_popup:
+                            self.progress_window.close()
+                        else:
+                            self.progress_window.mark_done()
+                            QTimer.singleShot(1600, lambda: setattr(self, "progress_window", None))
+                        self.progress_window = None
+                    if show_popup:
+                        msg_box = QMessageBox(self)
+                        msg_box.setWindowTitle("Download Complete")
+                        msg_box.setText(msg.get("message", "Done."))
+                        open_folder_btn = msg_box.addButton("Open Folder", QMessageBox.ActionRole)
+                        msg_box.addButton(QMessageBox.Ok)
+                        msg_box.exec()
+                        if msg_box.clickedButton() == open_folder_btn and job is not None:
+                            if sys.platform == "win32":
+                                subprocess.Popen(["explorer", job.folder])
+                            else:
+                                subprocess.Popen(["xdg-open", job.folder])
 
                 elif t == "job_error":
                     job = self._find_job(msg.get("job_id"))
@@ -696,7 +744,10 @@ class DownloaderWindow(QMainWindow):
                         job.status = "error"
                         self._update_job_item(job)
                     self.status_label.setText("Error.")
-                    QMessageBox.critical(self, "Error", msg.get("message", "Something went wrong."))
+                    if self.progress_window is not None:
+                        self.progress_window.mark_error(msg.get("message", "Something went wrong."))
+                    else:
+                        QMessageBox.critical(self, "Error", msg.get("message", "Something went wrong."))
 
                 elif t == "job_cancelled":
                     job = self._find_job(msg.get("job_id"))
@@ -704,6 +755,9 @@ class DownloaderWindow(QMainWindow):
                         job.status = "cancelled"
                         self._update_job_item(job)
                     self.status_label.setText(msg.get("message", "Cancelled."))
+                    if self.progress_window is not None:
+                        self.progress_window.mark_cancelled()
+                        QTimer.singleShot(1100, lambda: setattr(self, "progress_window", None))
 
                 elif t == "job_idle":
                     self.cancel_requested = False
@@ -886,8 +940,8 @@ class DownloaderWindow(QMainWindow):
             data = json.loads(self.settings_path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 defaults.update(data)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Failed to load settings: %s", e)
         return defaults
 
     def _save_settings(self) -> None:
@@ -895,5 +949,6 @@ class DownloaderWindow(QMainWindow):
         self.settings["default_download_dir"] = self.folder_input.text().strip() or default_download_dir()
         try:
             self.settings_path.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception("Failed to save settings: %s", e)
+            self.status_label.setText("Warning: Failed to save settings.")
